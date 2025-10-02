@@ -35,6 +35,7 @@
     <div id="map"></div>
   </div>
 
+  <!-- Optional: token box (not required to click Apply; token is already active) -->
   <div id="toolbar">
     <div><strong>Mapillary token</strong></div>
     <input id="token" type="text" value="MLY|24462366120070331|7b445698e786aaa212354b607653e542" />
@@ -47,7 +48,7 @@
 
     // ====== CONFIG ======
     const INITIAL = { lat: 39.5, lng: -98.35, zoom: 4 };
-    let ACCESS_TOKEN = document.getElementById('token').value.trim();
+    let ACCESS_TOKEN = "MLY|24462366120070331|7b445698e786aaa212354b607653e542"; // active by default
     // ====================
 
     // Initialize viewer
@@ -69,7 +70,7 @@
     // Helper: format timestamp (ms since epoch)
     const fmtTime = (ms) => {
       const n = Number(ms);
-      return isFinite(n) ? new Date(n).toLocaleString() : String(ms);
+      return Number.isFinite(n) ? new Date(n).toLocaleString() : String(ms);
     };
 
     // Styles
@@ -100,6 +101,13 @@
     const tilesURL = () =>
       `https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}?access_token=${encodeURIComponent(ACCESS_TOKEN)}`;
 
+    // SAFE: build a stable id from props only (no f.layer.name)
+    const featureId = (f) => {
+      const p = f && f.properties ? f.properties : {};
+      // order: image id -> sequence id -> representative image -> fallback
+      return String(p.id ?? p.sequence_id ?? p.image_id ?? Math.random());
+    };
+
     // VectorGrid
     let vgrid = L.vectorGrid.protobuf(tilesURL(), {
       maxNativeZoom: 14,
@@ -109,82 +117,12 @@
       vectorTileLayerStyles: {
         overview: (feat) => styles.overview(feat.properties, map.getZoom()),
         sequence: (feat) => styles.sequence(feat.properties, map.getZoom()),
-        image: (feat) => styles.image(feat.properties, map.getZoom())
+        image:    (feat) => styles.image(feat.properties, map.getZoom())
       },
-      getFeatureId: f => `${f.layer.name}:${f.properties.id}`
+      getFeatureId: featureId
     }).addTo(map);
 
     function updateLayerVisibility() {
       const z = map.getZoom();
       vgrid.options.vectorTileLayerStyles.overview = (feat) => (z <= 5 ? styles.overview(feat.properties, z) : []);
-      vgrid.options.vectorTileLayerStyles.sequence = (feat) => (z >= 6 && z <= 14 ? styles.sequence(feat.properties, z) : []);
-      vgrid.options.vectorTileLayerStyles.image    = (feat) => (z >= 14 ? styles.image(feat.properties, z) : []);
-      vgrid.redraw();
-    }
-    map.on('zoomend', updateLayerVisibility);
-    updateLayerVisibility();
-
-    // Click -> load image in viewer (at z14 clicks are image points)
-    vgrid.on('click', (e) => {
-      const props = e.layer?.properties || {};
-      const z = map.getZoom();
-      const layerGuess = (z <= 5 ? 'overview' : (z >= 14 ? 'image' : 'sequence'));
-
-      if (layerGuess === 'image' && props.id) {
-        viewer.moveTo(String(props.id));
-        L.popup().setLatLng(e.latlng).setContent(
-          `<b>Image</b><br/>id: ${props.id}<br/>captured_at: ${fmtTime(props.captured_at)}<br/>creator_id: ${props.creator_id}`
-        ).openOn(map);
-      } else if (layerGuess === 'sequence') {
-        const repImage = props.image_id;
-        const seqId = props.id || props.sequence_id;
-        if (repImage) viewer.moveTo(String(repImage));
-        L.popup().setLatLng(e.latlng).setContent(
-          `<b>Sequence</b><br/>id: ${seqId}<br/>image_id: ${repImage ?? '—'}<br/>captured_at: ${fmtTime(props.captured_at)}<br/>creator_id: ${props.creator_id}`
-        ).openOn(map);
-      } else {
-        L.popup().setLatLng(e.latlng).setContent(
-          `<b>Coverage overview</b><br/>image id: ${props.id}<br/>captured_at: ${fmtTime(props.captured_at)}`
-        ).openOn(map);
-      }
-    });
-
-    // Swap token on the fly
-    document.getElementById('apply').addEventListener('click', () => {
-      const t = document.getElementById('token').value.trim();
-      if (!t) return;
-      ACCESS_TOKEN = t;
-
-      // Rebuild vector tiles with new token
-      map.removeLayer(vgrid);
-      vgrid = L.vectorGrid.protobuf(tilesURL(), {
-        maxNativeZoom: 14,
-        minZoom: 0,
-        maxZoom: 19,
-        interactive: true,
-        vectorTileLayerStyles: vgrid.options.vectorTileLayerStyles,
-        getFeatureId: f => `${f.layer.name}:${f.properties.id}`
-      }).addTo(map);
-      updateLayerVisibility();
-
-      // Recreate viewer with new token
-      document.getElementById('mly').innerHTML = '';
-      viewer = new Viewer({
-        accessToken: ACCESS_TOKEN,
-        container: 'mly',
-        component: { cover: false }
-      });
-    });
-
-    // Support ?token=... in URL
-    (function () {
-      const p = new URLSearchParams(location.search);
-      const t = p.get('token');
-      if (t) {
-        document.getElementById('token').value = t;
-        document.getElementById('apply').click();
-      }
-    })();
-  </script>
-</body>
-</html>
+      vgrid.optio
