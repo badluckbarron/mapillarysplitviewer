@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Mapillary Split (Viewer + Map + FOV + Graph API filtered by user)</title>
+  <title>Mapillary Split (Viewer + Map + FOV + Graph API filtered)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- MapillaryJS -->
@@ -24,7 +24,7 @@
     }
     .legend {
       position: absolute; right: 10px; bottom: 10px; z-index: 9999;
-      background: rgba(255,255,255,.9); border: 1px solid #ccc; border-radius: 6px;
+      background: rgba(255,255,255,.95); border: 1px solid #ccc; border-radius: 6px;
       padding: 6px 8px; font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial;
     }
   </style>
@@ -35,7 +35,7 @@
     <div id="map"></div>
   </div>
   <div id="label">bearing: —°</div>
-  <div class="legend">filtered user_id: <b>461128976844139</b></div>
+  <div class="legend">showing images by user_id <b>461128976844139</b> nearest the map center</div>
 
   <script>
     // ==== Config ====
@@ -43,11 +43,23 @@
     const START_IMAGE_ID = "744575191439794";
     const FILTER_USER_ID = "461128976844139";
 
-    const FOV_DEGREES = 60;          // wedge aperture
-    const RANGE_METERS = 60;         // wedge length
-    const PAN_THRESHOLD_M = 152.4;   // 500 ft
-    const IMAGE_LIMIT = 1000;        // max images per request (Graph API cap is typically 1000)
-    const REFRESH_DEBOUNCE_MS = 250;
+    // FOV wedge + fetch behavior
+    const FOV_DEGREES = 60;               // wedge aperture
+    const RANGE_METERS = 60;              // wedge length
+    const PAN_THRESHOLD_M = 152.4;        // 500 ft before refetch on pan
+    const IMAGE_LIMIT = 1000;             // Graph API page size
+    const REFRESH_DEBOUNCE_MS = 250;      // debounce for map interactions
+    const NEAR_LIMIT = 400;               // draw at most this many nearest points
+
+    // Zoom-aware "near" radius (meters) to focus points around center
+    function nearRadiusForZoom(z) {
+      if (z >= 18) return 150;
+      if (z >= 17) return 250;
+      if (z >= 16) return 400;
+      if (z >= 15) return 700;
+      if (z >= 14) return 1200;
+      return 2000;
+    }
 
     // ==== Mapillary Viewer ====
     const viewer = new mapillary.Viewer({
@@ -62,17 +74,15 @@
       attribution: "&copy; OpenStreetMap"
     }).addTo(map);
 
-    // Layers
+    // Layers & state
     const imagesLayer = L.layerGroup().addTo(map);
     let imageMarker = null;
     let wedge = null;
-
-    // State
     let currentLatLng = null;
     let currentBearing = null;
     let firstPositioned = false;
 
-    // Utils
+    // --- Utils ---
     function haversine(a, b) {
       const R = 6371000;
       const φ1 = a.lat * Math.PI/180, φ2 = b.lat * Math.PI/180;
@@ -84,12 +94,7 @@
 
     function getViewportBBox() {
       const b = map.getBounds();
-      return {
-        minLon: b.getWest(),
-        minLat: b.getSouth(),
-        maxLon: b.getEast(),
-        maxLat: b.getNorth()
-      };
+      return { minLon: b.getWest(), minLat: b.getSouth(), maxLon: b.getEast(), maxLat: b.getNorth() };
     }
 
     function destPoint(lat, lng, bearingDeg, distanceMeters) {
@@ -139,51 +144,46 @@
       }
     }
 
-    // --- Graph API fetch limited to a user ---
-    // Some deployments accept `user_ids=...`. If that fails, we fall back to client-side filter using `creator_id`.
-    async function fetchImagesForViewportFilteredByUser(bbox) {
-      const base = new URL("https://graph.mapillary.com/images");
-      base.searchParams.set("fields", "id,computed_geometry,creator_id");
-      base.searchParams.set("limit", String(IMAGE_LIMIT));
-      base.searchParams.set("bbox", `${bbox.minLon},${bbox.minLat},${bbox.maxLon},${bbox.maxLat}`);
-      base.searchParams.set("access_token", ACCESS_TOKEN);
-
-      // Attempt server-side filter first
-      let urlWithUser = new URL(base);
-      urlWithUser.searchParams.set("user_ids", FILTER_USER_ID);
+    // --- Graph API fetch (client-side filter on creator_id) ---
+    async function fetchImagesForViewport(bbox) {
+      const url = new URL("https://graph.mapillary.com/images");
+      url.searchParams.set("fields", "id,computed_geometry,creator_id");
+      url.searchParams.set("limit", String(IMAGE_LIMIT));
+      url.searchParams.set("bbox", `${bbox.minLon},${bbox.minLat},${bbox.maxLon},${bbox.maxLat}`);
+      url.searchParams.set("access_token", ACCESS_TOKEN);
 
       try {
-        let resp = await fetch(urlWithUser.toString());
-        // If the param isn't supported, some servers return 400/500. Fall back below.
+        const resp = await fetch(url.toString());
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        // If we got data, we're done.
-        if (Array.isArray(data.data)) return data.data;
-        // If structure unexpected, fall through to fallback.
+        return Array.isArray(data.data) ? data.data : [];
       } catch (e) {
-        // Fallback: fetch without user filter and filter on client by creator_id
-        try {
-          const resp2 = await fetch(base.toString());
-          if (!resp2.ok) throw new Error(`HTTP ${resp2.status}`);
-          const data2 = await resp2.json();
-          const items = Array.isArray(data2.data) ? data2.data : [];
-          return items.filter(d => String(d.creator_id) === FILTER_USER_ID);
-        } catch (e2) {
-          // On failure, return empty
-          return [];
-        }
+        return [];
       }
-
-      return [];
     }
 
-    // --- Drawing points ---
-    function drawImagePoints(items) {
+    function drawNearestFiltered(items) {
       imagesLayer.clearLayers();
-      items.forEach(d => {
-        const g = d.computed_geometry;
-        if (!g || g.type !== "Point" || !Array.isArray(g.coordinates)) return;
-        const [lon, lat] = g.coordinates;
+
+      const center = map.getCenter();
+      const nearRadius = nearRadiusForZoom(map.getZoom());
+
+      // 1) Filter to the requested user_id (creator_id).
+      const mine = items.filter(d => String(d.creator_id) === String(FILTER_USER_ID) && d.computed_geometry && d.computed_geometry.type === "Point");
+
+      // 2) Compute distance to map center for each, sort by distance.
+      const enriched = mine.map(d => {
+        const [lon, lat] = d.computed_geometry.coordinates;
+        const dist = haversine(center, { lat, lng: lon });
+        return { d, lat, lon, dist };
+      }).sort((a, b) => a.dist - b.dist);
+
+      // 3) Prefer those within the zoom-aware radius; if none, take the nearest anyway.
+      const within = enriched.filter(x => x.dist <= nearRadius);
+      const chosen = (within.length ? within : enriched).slice(0, NEAR_LIMIT);
+
+      // 4) Draw points
+      chosen.forEach(({ d, lat, lon }) => {
         const m = L.circleMarker([lat, lon], { radius: 3.5, weight: 1, fillOpacity: 0.85 });
         m.on("click", () => viewer.moveTo(String(d.id)));
         m.addTo(imagesLayer);
@@ -194,7 +194,7 @@
     let lastPanChecked = null;
     let debounceTimer = null;
 
-    function scheduleViewportFetch(force=false) {
+    async function refetchViewport(force=false) {
       const center = map.getCenter();
       if (!force && lastPanChecked) {
         const dist = haversine(lastPanChecked, { lat: center.lat, lng: center.lng });
@@ -205,8 +205,8 @@
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(async () => {
         const bbox = getViewportBBox();
-        const items = await fetchImagesForViewportFilteredByUser(bbox);
-        drawImagePoints(items);
+        const items = await fetchImagesForViewport(bbox);
+        drawNearestFiltered(items);
       }, REFRESH_DEBOUNCE_MS);
     }
 
@@ -227,11 +227,9 @@
         firstPositioned = true;
         map.setView([currentLatLng.lat, currentLatLng.lng], 18);
         setTimeout(() => map.invalidateSize(), 0);
-        // initial fetch for the current viewport
-        scheduleViewportFetch(true);
+        refetchViewport(true);  // initial fetch
       } else {
-        // center moved because image changed? refresh around viewer when it pans a lot
-        scheduleViewportFetch(false);
+        refetchViewport(false); // on image changes during navigation
       }
 
       if (typeof currentBearing === 'number') {
@@ -247,8 +245,8 @@
     });
 
     // Map interaction triggers
-    map.on('zoomend', () => scheduleViewportFetch(true));     // any zoom => refetch
-    map.on('moveend', () => scheduleViewportFetch(false));    // pan > 500ft => refetch
+    map.on('zoomend', () => refetchViewport(true));     // any zoom => refetch
+    map.on('moveend', () => refetchViewport(false));    // pan > threshold => refetch
   </script>
 </body>
 </html>
