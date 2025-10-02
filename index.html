@@ -38,21 +38,21 @@
 
   <div id="toolbar">
     <div><strong>Mapillary token</strong></div>
-    <input id="token" type="text" placeholder="MLY|24462366120070331|7b445698e786aaa212354b607653e542" />
+    <input id="token" type="text" value="MLY|24462366120070331|7b445698e786aaa212354b607653e542" />
     <button id="apply">Apply</button>
   </div>
 
   <script>
     // ====== CONFIG ======
-    const INITIAL = { lat: 39.5, lng: -98.35, zoom: 4 }; // USA view; adjust as you like
-    let ACCESS_TOKEN = 'MLY|24462366120070331|7b445698e786aaa212354b607653e542';            // <-- replace
+    const INITIAL = { lat: 39.5, lng: -98.35, zoom: 4 }; // Adjust as needed
+    let ACCESS_TOKEN = 'MLY|24462366120070331|7b445698e786aaa212354b607653e542';
     // ====================
 
-    // Initialize viewer (no image at start; we will moveTo when clicking a point)
+    // Initialize viewer
     const viewer = new Mapillary.Viewer({
       accessToken: ACCESS_TOKEN,
       container: 'mly',
-      component: { cover: false } // start without splash
+      component: { cover: false }
     });
 
     // Initialize Leaflet map
@@ -61,147 +61,104 @@
       preferCanvas: true
     }).setView([INITIAL.lat, INITIAL.lng], INITIAL.zoom);
 
-    // Basemap (OSM)
+    // Basemap
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    // Helper: format timestamp (ms since epoch) to local string
+    // Helper: format timestamp (ms since epoch)
     function fmtTime(ms) {
-      try {
-        return new Date(Number(ms)).toLocaleString();
-      } catch (e) {
-        return ms;
-      }
+      try { return new Date(Number(ms)).toLocaleString(); }
+      catch { return ms; }
     }
 
-    // Style functions per layer
+    // Styles
     const styles = {
-      overview: function (props, zoom) {
-        // z 0–5
-        return {
-          radius: 3 + Math.max(0, zoom - 2),
-          weight: 0,
-          fill: true,
-          fillColor: '#1e88e5',
-          fillOpacity: 0.7
-        };
-      },
-      sequence: function (props, zoom) {
-        // z 6–14
-        return {
-          weight: Math.min(6, Math.max(1, (zoom - 5) * 0.8)),
-          color: props.is_pano ? '#8e24aa' : '#43a047',
-          opacity: 0.8
-        };
-      },
-      image: function (props, zoom) {
-        // z 14 only
-        return {
-          radius: 4 + Math.max(0, zoom - 14),
-          weight: 1,
-          color: '#0d47a1',
-          fill: true,
-          fillColor: props.is_pano ? '#ff6f00' : '#1976d2',
-          fillOpacity: 0.9
-        };
-      }
+      overview: (props, z) => ({
+        radius: 3 + Math.max(0, z - 2),
+        weight: 0,
+        fill: true,
+        fillColor: '#1e88e5',
+        fillOpacity: 0.7
+      }),
+      sequence: (props, z) => ({
+        weight: Math.min(6, Math.max(1, (z - 5) * 0.8)),
+        color: props.is_pano ? '#8e24aa' : '#43a047',
+        opacity: 0.8
+      }),
+      image: (props, z) => ({
+        radius: 4 + Math.max(0, z - 14),
+        weight: 1,
+        color: '#0d47a1',
+        fill: true,
+        fillColor: props.is_pano ? '#ff6f00' : '#1976d2',
+        fillOpacity: 0.9
+      })
     };
 
-    // Vector tile URL builder
-    function tilesURL() {
-      return `https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}?access_token=MLY|24462366120070331|7b445698e786aaa212354b607653e542`;
-    }
+    // Vector tile URL
+    const tilesURL = () =>
+      `https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}?access_token=${encodeURIComponent(ACCESS_TOKEN)}`;
 
-    // Build the VectorGrid layer (note: we’ll hide/show sublayers by zoom)
-    const vgrid = L.vectorGrid.protobuf(tilesURL(), {
+    // VectorGrid
+    let vgrid = L.vectorGrid.protobuf(tilesURL(), {
       maxNativeZoom: 14,
       minZoom: 0,
       maxZoom: 19,
       interactive: true,
       vectorTileLayerStyles: {
-        // These keys must match the layer names in the tiles: overview, sequence, image
-        overview: function (feat) { return styles.overview(feat.properties, map.getZoom()); },
-        sequence: function (feat) { return styles.sequence(feat.properties, map.getZoom()); },
-        image: function (feat) { return styles.image(feat.properties, map.getZoom()); }
+        overview: (feat) => styles.overview(feat.properties, map.getZoom()),
+        sequence: (feat) => styles.sequence(feat.properties, map.getZoom()),
+        image: (feat) => styles.image(feat.properties, map.getZoom())
       },
       getFeatureId: f => `${f.layer.name}:${f.properties.id}`
     }).addTo(map);
 
-    // Only render the appropriate sublayer(s) at each zoom
     function updateLayerVisibility() {
       const z = map.getZoom();
-      // Hiding-by-style: set an "empty style" for layers we don’t want at this zoom
       vgrid.options.vectorTileLayerStyles.overview = (feat) => (z <= 5 ? styles.overview(feat.properties, z) : []);
       vgrid.options.vectorTileLayerStyles.sequence = (feat) => (z >= 6 && z <= 14 ? styles.sequence(feat.properties, z) : []);
       vgrid.options.vectorTileLayerStyles.image    = (feat) => (z >= 14 ? styles.image(feat.properties, z) : []);
-      // Force a redraw so the new styles apply immediately
       vgrid.redraw();
     }
     map.on('zoomend', updateLayerVisibility);
     updateLayerVisibility();
 
-    // Hover cursor
-    map.on('mousemove', (e) => { /* just ensuring map stays responsive */ });
-
-    // Click handler for features
+    // Click -> load image in viewer
     vgrid.on('click', (e) => {
-      const layerName = e.layer.properties && e.layer.properties['layer'];
-      // Leaflet.VectorGrid packs layer name differently; safer to read from event.layerName if available
-      const name = e.layerName || (e.layer && e.layer.name) || e.layer.properties?.layer || e.layer?._layerName || e.sourceTarget?._eventParents?.name || null;
-
-      const props = e.layer.properties || {};
+      const props = e.layer?.properties || {};
       const z = map.getZoom();
+      const layerGuess = (z <= 5 ? 'overview' : (z >= 14 ? 'image' : 'sequence'));
 
-      // Prefer explicit names per the tileset:
-      const guessedLayer =
-        (e.layer && e.layer._layerName) ||
-        (e.layerName) ||
-        (z <= 5 ? 'overview' : (z >= 14 ? 'image' : 'sequence'));
-
-      if (guessedLayer === 'image' && props.id) {
-        // image layer: id is the image ID
-        viewer.moveTo(String(props.id));  // MapillaryJS supports viewer.moveTo("<image-id>")
-        L.popup()
-          .setLatLng(e.latlng)
-          .setContent(
-            `<b>Image</b><br/>id: ${props.id}<br/>captured_at: ${fmtTime(props.captured_at)}<br/>creator_id: ${props.creator_id}`
-          )
-          .openOn(map);
-      } else if (guessedLayer === 'sequence') {
-        // sequence layer: show info and (optionally) move to representative image_id
+      if (layerGuess === 'image' && props.id) {
+        viewer.moveTo(String(props.id));
+        L.popup().setLatLng(e.latlng).setContent(
+          `<b>Image</b><br/>id: ${props.id}<br/>captured_at: ${fmtTime(props.captured_at)}<br/>creator_id: ${props.creator_id}`
+        ).openOn(map);
+      } else if (layerGuess === 'sequence') {
         const repImage = props.image_id;
         const seqId = props.id || props.sequence_id;
-        if (repImage) {
-          viewer.moveTo(String(repImage));
-        }
-        L.popup()
-          .setLatLng(e.latlng)
-          .setContent(
-            `<b>Sequence</b><br/>id: ${seqId}<br/>image_id: ${repImage ?? '—'}<br/>captured_at: ${fmtTime(props.captured_at)}<br/>creator_id: ${props.creator_id}`
-          )
-          .openOn(map);
+        if (repImage) viewer.moveTo(String(repImage));
+        L.popup().setLatLng(e.latlng).setContent(
+          `<b>Sequence</b><br/>id: ${seqId}<br/>image_id: ${repImage ?? '—'}<br/>captured_at: ${fmtTime(props.captured_at)}<br/>creator_id: ${props.creator_id}`
+        ).openOn(map);
       } else {
-        // overview layer: just a tiny info popup
-        L.popup()
-          .setLatLng(e.latlng)
-          .setContent(
-            `<b>Coverage overview</b><br/>image id: ${props.id}<br/>captured_at: ${fmtTime(props.captured_at)}`
-          )
-          .openOn(map);
+        L.popup().setLatLng(e.latlng).setContent(
+          `<b>Coverage overview</b><br/>image id: ${props.id}<br/>captured_at: ${fmtTime(props.captured_at)}`
+        ).openOn(map);
       }
     });
 
-    // Token UI (optional)
+    // Token swap UI
     document.getElementById('apply').addEventListener('click', () => {
       const t = document.getElementById('token').value.trim();
       if (!t) return;
       ACCESS_TOKEN = t;
 
-      // Recreate the vector layer pointing at the new token
+      // Rebuild vector tiles with new token
       map.removeLayer(vgrid);
-      const newGrid = L.vectorGrid.protobuf(tilesURL(), {
+      vgrid = L.vectorGrid.protobuf(tilesURL(), {
         maxNativeZoom: 14,
         minZoom: 0,
         maxZoom: 19,
@@ -209,18 +166,22 @@
         vectorTileLayerStyles: vgrid.options.vectorTileLayerStyles,
         getFeatureId: f => `${f.layer.name}:${f.properties.id}`
       }).addTo(map);
+      vgrid.on('click', (ev) => map.fire('click', ev)); // (not strictly needed)
+      updateLayerVisibility();
 
-      // Rewire events and reference
-      newGrid.on('click', (ev) => vgrid.fire('click', ev)); // delegate to the same handler
-      vgrid.remove();
-      // Replace reference and ensure visibility logic applies
-      // (easier is to reload page, but we’ll keep it live)
-      // In practice, you'd rebind handlers like we did above.
-      location.reload(); // simplest for token swap
+      // Update viewer token (recreating viewer is simplest + safest)
+      const container = document.getElementById('mly');
+      container.innerHTML = '';
+      const newViewer = new Mapillary.Viewer({
+        accessToken: ACCESS_TOKEN,
+        container: 'mly',
+        component: { cover: false }
+      });
+      // optional: moveTo last image again if you want to persist state
     });
 
-    // Try reading token from URL (?token=...)
-    (function tryTokenFromURL() {
+    // Support ?token=... in URL
+    (function () {
       const params = new URLSearchParams(location.search);
       const t = params.get('token');
       if (t) {
