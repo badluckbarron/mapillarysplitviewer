@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Mapillary Split View (Viewer + Map + FOV + Points)</title>
+  <title>Mapillary Split (Viewer + Map + FOV + Coverage Tiles)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- MapillaryJS v4 -->
@@ -12,6 +12,9 @@
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet.VectorGrid (for vector tiles) -->
+  <script src="https://unpkg.com/leaflet.vectorgrid@1.3.0/dist/Leaflet.VectorGrid.bundled.js"></script>
 
   <style>
     html, body { height: 100%; margin: 0; }
@@ -35,14 +38,8 @@
     // ==== Config ====
     const ACCESS_TOKEN = "MLY|24462366120070331|7b445698e786aaa212354b607653e542";
     const START_IMAGE_ID = "744575191439794";
-    const FOV_DEGREES = 60;         // wedge aperture
-    const RANGE_METERS = 60;        // wedge length
-    const SEARCH_RADIUS_M = 350;    // fetch radius around query center
-    const IMAGE_LIMIT = 500;        // cap points per request
-
-    // Refetch rules for interactions
-    const PAN_THRESHOLD_M = 152.4;  // 500 ft
-    const REFRESH_DEBOUNCE_MS = 250;
+    const FOV_DEGREES = 60;   // wedge aperture
+    const RANGE_METERS = 60;  // wedge length
 
     // ==== Mapillary Viewer ====
     const viewer = new mapillary.Viewer({
@@ -57,92 +54,57 @@
       attribution: "&copy; OpenStreetMap"
     }).addTo(map);
 
+    // ---- Coverage Vector Tiles ----
+    const vtUrl =
+      `https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}.pbf?access_token=${encodeURIComponent(ACCESS_TOKEN)}`;
+
+    // Styling per coverage layer
+    const vectorTileStyles = {
+      // z 0–5 points
+      overview: function(properties, zoom) {
+        return {
+          radius: 2.5,
+          weight: 1,
+          color: '#2b6cb0',
+          fillColor: '#63b3ed',
+          fill: true,
+          fillOpacity: 0.9
+        };
+      },
+      // z 6–14 sequences (lines)
+      sequence: function(properties, zoom) {
+        return {
+          weight: 2,
+          color: '#3182ce',
+          opacity: 0.8
+        };
+      }
+    };
+
+    // Build layer
+    const coverage = L.vectorGrid.protobuf(vtUrl, {
+      vectorTileLayerStyles: vectorTileStyles,
+      interactive: true,
+      getFeatureId: f => f.properties.id // stable per feature for events
+    }).addTo(map);
+
+    // Click → move viewer
+    coverage.on('click', e => {
+      const p = e.layer && e.layer.properties ? e.layer.properties : {};
+      // overview layer has 'id' (image id), sequence layer has 'image_id'
+      const imageId = p.id || p.image_id;
+      if (imageId) {
+        viewer.moveTo(String(imageId));
+      }
+    });
+
+    // ---- Current image marker + wedge ----
     let imageMarker = null;
     let wedge = null;
     let currentLatLng = null;
     let currentBearing = null;
     let firstPositioned = false;
 
-    // Layer to hold the nearby image points
-    const imagesLayer = L.layerGroup().addTo(map);
-
-    // Utils
-    function haversine(a, b) {
-      const R = 6371000;
-      const φ1 = a.lat * Math.PI/180, φ2 = b.lat * Math.PI/180;
-      const dφ = (b.lat - a.lat) * Math.PI/180;
-      const dλ = (b.lng - a.lng) * Math.PI/180;
-      const s = Math.sin(dφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(dλ/2)**2;
-      return 2*R*Math.asin(Math.sqrt(s));
-    }
-
-    function bboxFromCenterMeters(lat, lng, radiusM) {
-      const dLat = (radiusM / 111320);
-      const dLng = radiusM / (111320 * Math.cos(lat * Math.PI/180));
-      return {
-        minLon: lng - dLng, minLat: lat - dLat,
-        maxLon: lng + dLng, maxLat: lat + dLat
-      };
-    }
-
-    // --- Nearby images fetching with debounce and cancellation ---
-    let lastFetchCenter = null;     // last center used for fetch
-    let lastPanChecked = null;      // last center used for pan-threshold logic
-    let pendingFetch = 0;           // cancellation ticket
-    let debounceTimer = null;
-
-    function scheduleFetch(center, force=false) {
-      // If not forced, apply pan threshold (500 ft) to avoid spam during small moves
-      if (!force && lastPanChecked) {
-        const dist = haversine(lastPanChecked, center);
-        if (dist < PAN_THRESHOLD_M) return;
-      }
-      lastPanChecked = { ...center };
-
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => loadNearbyImages(center), REFRESH_DEBOUNCE_MS);
-    }
-
-    async function loadNearbyImages(center) {
-      pendingFetch += 1;
-      const ticket = pendingFetch;
-
-      // If the center hasn't changed much since last fetch, skip
-      if (lastFetchCenter && haversine(lastFetchCenter, center) < 1) return;
-      lastFetchCenter = { ...center };
-
-      const bb = bboxFromCenterMeters(center.lat, center.lng, SEARCH_RADIUS_M);
-      const url = new URL("https://graph.mapillary.com/images");
-      url.searchParams.set("fields", "id,computed_geometry");
-      url.searchParams.set("limit", String(IMAGE_LIMIT));
-      url.searchParams.set("bbox", `${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}`);
-      url.searchParams.set("access_token", ACCESS_TOKEN);
-
-      try {
-        const resp = await fetch(url.toString());
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        if (ticket !== pendingFetch) return; // superseded
-
-        imagesLayer.clearLayers();
-        if (Array.isArray(data.data)) {
-          data.data.forEach(d => {
-            const g = d.computed_geometry;
-            if (!g || g.type !== "Point" || !Array.isArray(g.coordinates)) return;
-            const [lon, lat] = g.coordinates;
-            const m = L.circleMarker([lat, lon], {
-              radius: 3.5, weight: 1, fillOpacity: 0.8
-            });
-            m.on("click", () => viewer.moveTo(d.id));
-            m.addTo(imagesLayer);
-          });
-        }
-      } catch (e) {
-        // Optional: console.warn("Mapillary image fetch failed:", e);
-      }
-    }
-
-    // Wedge helpers
     function destPoint(lat, lng, bearingDeg, distanceMeters) {
       const R = 6371000;
       const δ = distanceMeters / R;
@@ -164,14 +126,17 @@
 
     function updateWedge() {
       if (!currentLatLng || currentBearing == null) return;
+
       const half = FOV_DEGREES / 2;
       const start = destPoint(currentLatLng.lat, currentLatLng.lng, currentBearing - half, RANGE_METERS);
       const end   = destPoint(currentLatLng.lat, currentLatLng.lng, currentBearing + half, RANGE_METERS);
+
       const coords = [
         [currentLatLng.lat, currentLatLng.lng],
         [start[0], start[1]],
         [end[0], end[1]]
       ];
+
       if (!wedge) {
         wedge = L.polygon(coords, { weight: 1, fillOpacity: 0.15 });
         wedge.addTo(map);
@@ -192,7 +157,7 @@
 
     const label = document.getElementById('label');
 
-    // Drive from IMAGE event (has lngLat/compassAngle)
+    // Drive map from image events
     viewer.on('image', (ev) => {
       const img = ev.image;
       if (!img || !img.lngLat) return;
@@ -202,7 +167,6 @@
 
       updateMarker(currentLatLng.lat, currentLatLng.lng);
       updateWedge();
-      scheduleFetch(currentLatLng, /*force*/ true); // always refresh around the current image
 
       if (!firstPositioned) {
         firstPositioned = true;
@@ -221,19 +185,6 @@
       currentBearing = e.bearing;
       label.textContent = `bearing: ${currentBearing.toFixed(1)}°`;
       updateWedge();
-    });
-
-    // === Map interaction refetch rules ===
-    // 1) Any zoom change => refetch at current map center
-    map.on('zoomend', () => {
-      const c = map.getCenter();
-      scheduleFetch({ lat: c.lat, lng: c.lng }, /*force*/ true);
-    });
-
-    // 2) Pan greater than 500 ft => refetch
-    map.on('moveend', () => {
-      const c = map.getCenter();
-      scheduleFetch({ lat: c.lat, lng: c.lng }, /*force*/ false);
     });
   </script>
 </body>
