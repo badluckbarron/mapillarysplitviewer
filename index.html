@@ -7,18 +7,16 @@
 
   <!-- MapillaryJS v4 -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/mapillary-js@latest/dist/mapillary.css" />
-  <script src="https://cdn.jsdelivr.net/npm/mapillary-js@latest/dist/mapillary.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mapillary-js@latest/dist/mapillary.min.js"></script>
 
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <style>
-    /* Make it fill the widget */
     html, body { height: 100%; margin: 0; }
-    #wrap { height: 100%; width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+    #wrap { height: 100%; width: 100%; display: grid; grid-template-columns: 55% 45%; }
     #mly, #map { height: 100%; width: 100%; }
-    /* Small status label (optional) */
     #label {
       position: absolute; z-index: 9999; left: 10px; top: 10px;
       background: rgba(0,0,0,.6); color: #fff; padding: 6px 8px; border-radius: 6px;
@@ -37,8 +35,8 @@
     // ==== Config ====
     const ACCESS_TOKEN = "MLY|24462366120070331|7b445698e786aaa212354b607653e542";
     const START_IMAGE_ID = "744575191439794";
-    const FOV_DEGREES = 60;     // approximate field-of-view for wedge (tweak if you prefer)
-    const RANGE_METERS = 60;    // wedge length (meters) from camera position
+    const FOV_DEGREES = 60;   // wedge aperture
+    const RANGE_METERS = 60;  // wedge length
 
     // ==== Mapillary Viewer ====
     const viewer = new mapillary.Viewer({
@@ -49,26 +47,22 @@
 
     // ==== Leaflet Map ====
     const map = L.map("map");
-    const basemap = L.tileLayer(
-      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      { attribution: "&copy; OpenStreetMap" }
-    ).addTo(map);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap"
+    }).addTo(map);
 
-    // Marker and wedge layers
     let imageMarker = null;
     let wedge = null;
     let currentLatLng = null;
     let currentBearing = null;
     let firstPositioned = false;
 
-    // Haversine-based destination point (bearing degrees, distance meters)
+    // Compute destination lat/lng from start, bearing (deg), distance (m)
     function destPoint(lat, lng, bearingDeg, distanceMeters) {
-      const R = 6371000; // meters
+      const R = 6371000;
       const δ = distanceMeters / R;
       const θ = bearingDeg * Math.PI / 180;
-
-      const φ1 = lat * Math.PI / 180;
-      const λ1 = lng * Math.PI / 180;
+      const φ1 = lat * Math.PI / 180, λ1 = lng * Math.PI / 180;
 
       const sinφ1 = Math.sin(φ1), cosφ1 = Math.cos(φ1);
       const sinδ = Math.sin(δ), cosδ = Math.cos(δ);
@@ -97,9 +91,8 @@
       ];
 
       if (!wedge) {
-        wedge = L.polygon(coords, {
-          weight: 1, fillOpacity: 0.15
-        }).addTo(map);
+        wedge = L.polygon(coords, { weight: 1, fillOpacity: 0.15 });
+        wedge.addTo(map);
       } else {
         wedge.setLatLngs(coords);
       }
@@ -115,10 +108,15 @@
       }
     }
 
-    // 1) Sync position (fires when current image position changes)
-    viewer.on('position', async () => {
-      const pos = await viewer.getPosition(); // { imageId, lngLat: { lng, lat } }
-      currentLatLng = { lat: pos.lngLat.lat, lng: pos.lngLat.lng };
+    const label = document.getElementById('label');
+
+    // ---- Drive map from the IMAGE event (has guaranteed lngLat/compassAngle) ----
+    viewer.on('image', (ev) => {
+      const img = ev.image;
+      if (!img || !img.lngLat) return;
+
+      currentLatLng = { lat: img.lngLat.lat, lng: img.lngLat.lng };
+      if (typeof img.compassAngle === 'number') currentBearing = img.compassAngle;
 
       updateMarker(currentLatLng.lat, currentLatLng.lng);
       updateWedge();
@@ -126,21 +124,21 @@
       if (!firstPositioned) {
         firstPositioned = true;
         map.setView([currentLatLng.lat, currentLatLng.lng], 18);
+        // Fix sizing when embedded in ExB layout panes
+        setTimeout(() => map.invalidateSize(), 0);
+      }
+
+      if (typeof currentBearing === 'number') {
+        label.textContent = `bearing: ${currentBearing.toFixed(1)}°`;
       }
     });
 
-    // 2) Sync bearing (fires when camera direction changes)
-    const label = document.getElementById('label');
-    viewer.on('bearing', (ev) => {
-      currentBearing = ev.bearing; // degrees clockwise from north
+    // ---- Keep wedge rotating as the user drags/plays in the viewer ----
+    viewer.on('bearing', (e) => {
+      if (typeof e.bearing !== 'number') return;
+      currentBearing = e.bearing;
       label.textContent = `bearing: ${currentBearing.toFixed(1)}°`;
       updateWedge();
-    });
-
-    // 3) Also update on explicit image change (optional redundancy)
-    viewer.on('image', async (ev) => {
-      // You could read ev.image.compassAngle or ev.image.lngLat here if desired.
-      // We'll rely on the position/bearing events above to keep things in sync.
     });
   </script>
 </body>
