@@ -35,11 +35,14 @@
     // ==== Config ====
     const ACCESS_TOKEN = "MLY|24462366120070331|7b445698e786aaa212354b607653e542";
     const START_IMAGE_ID = "744575191439794";
-    const FOV_DEGREES = 60;   // wedge aperture
-    const RANGE_METERS = 60;  // wedge length
-    const SEARCH_RADIUS_M = 350;  // how far to fetch nearby image points
-    const REFETCH_THRESHOLD_M = 120; // move > this distance => refresh points
-    const IMAGE_LIMIT = 500;  // max points per fetch
+    const FOV_DEGREES = 60;         // wedge aperture
+    const RANGE_METERS = 60;        // wedge length
+    const SEARCH_RADIUS_M = 350;    // fetch radius around query center
+    const IMAGE_LIMIT = 500;        // cap points per request
+
+    // Refetch rules for interactions
+    const PAN_THRESHOLD_M = 152.4;  // 500 ft
+    const REFRESH_DEBOUNCE_MS = 250;
 
     // ==== Mapillary Viewer ====
     const viewer = new mapillary.Viewer({
@@ -63,7 +66,7 @@
     // Layer to hold the nearby image points
     const imagesLayer = L.layerGroup().addTo(map);
 
-    // Utility: meters distance between two lat/lngs
+    // Utils
     function haversine(a, b) {
       const R = 6371000;
       const φ1 = a.lat * Math.PI/180, φ2 = b.lat * Math.PI/180;
@@ -73,9 +76,8 @@
       return 2*R*Math.asin(Math.sqrt(s));
     }
 
-    // Compute a bbox (in lon/lat degrees) around a center with a given meter radius
     function bboxFromCenterMeters(lat, lng, radiusM) {
-      const dLat = (radiusM / 111320); // ~meters per deg latitude
+      const dLat = (radiusM / 111320);
       const dLng = radiusM / (111320 * Math.cos(lat * Math.PI/180));
       return {
         minLon: lng - dLng, minLat: lat - dLat,
@@ -83,17 +85,31 @@
       };
     }
 
-    // Fetch nearby images via Graph API and draw them
-    let lastFetchCenter = null;
-    let pendingFetch = null;
-    async function loadNearbyImages(center) {
-      // Debounce on distance
-      if (lastFetchCenter && haversine(lastFetchCenter, center) < REFETCH_THRESHOLD_M) return;
-      lastFetchCenter = { ...center };
+    // --- Nearby images fetching with debounce and cancellation ---
+    let lastFetchCenter = null;     // last center used for fetch
+    let lastPanChecked = null;      // last center used for pan-threshold logic
+    let pendingFetch = 0;           // cancellation ticket
+    let debounceTimer = null;
 
-      // Cancel any previous in-flight (best-effort)
-      pendingFetch = (pendingFetch || 0) + 1;
+    function scheduleFetch(center, force=false) {
+      // If not forced, apply pan threshold (500 ft) to avoid spam during small moves
+      if (!force && lastPanChecked) {
+        const dist = haversine(lastPanChecked, center);
+        if (dist < PAN_THRESHOLD_M) return;
+      }
+      lastPanChecked = { ...center };
+
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => loadNearbyImages(center), REFRESH_DEBOUNCE_MS);
+    }
+
+    async function loadNearbyImages(center) {
+      pendingFetch += 1;
       const ticket = pendingFetch;
+
+      // If the center hasn't changed much since last fetch, skip
+      if (lastFetchCenter && haversine(lastFetchCenter, center) < 1) return;
+      lastFetchCenter = { ...center };
 
       const bb = bboxFromCenterMeters(center.lat, center.lng, SEARCH_RADIUS_M);
       const url = new URL("https://graph.mapillary.com/images");
@@ -106,9 +122,8 @@
         const resp = await fetch(url.toString());
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        if (ticket !== pendingFetch) return; // a newer request started
+        if (ticket !== pendingFetch) return; // superseded
 
-        // Draw
         imagesLayer.clearLayers();
         if (Array.isArray(data.data)) {
           data.data.forEach(d => {
@@ -127,7 +142,7 @@
       }
     }
 
-    // Compute destination point for wedge
+    // Wedge helpers
     function destPoint(lat, lng, bearingDeg, distanceMeters) {
       const R = 6371000;
       const δ = distanceMeters / R;
@@ -177,7 +192,7 @@
 
     const label = document.getElementById('label');
 
-    // Drive from IMAGE event (guaranteed lngLat/compassAngle)
+    // Drive from IMAGE event (has lngLat/compassAngle)
     viewer.on('image', (ev) => {
       const img = ev.image;
       if (!img || !img.lngLat) return;
@@ -187,7 +202,7 @@
 
       updateMarker(currentLatLng.lat, currentLatLng.lng);
       updateWedge();
-      loadNearbyImages(currentLatLng);  // <-- load/update nearby image points
+      scheduleFetch(currentLatLng, /*force*/ true); // always refresh around the current image
 
       if (!firstPositioned) {
         firstPositioned = true;
@@ -206,6 +221,19 @@
       currentBearing = e.bearing;
       label.textContent = `bearing: ${currentBearing.toFixed(1)}°`;
       updateWedge();
+    });
+
+    // === Map interaction refetch rules ===
+    // 1) Any zoom change => refetch at current map center
+    map.on('zoomend', () => {
+      const c = map.getCenter();
+      scheduleFetch({ lat: c.lat, lng: c.lng }, /*force*/ true);
+    });
+
+    // 2) Pan greater than 500 ft => refetch
+    map.on('moveend', () => {
+      const c = map.getCenter();
+      scheduleFetch({ lat: c.lat, lng: c.lng }, /*force*/ false);
     });
   </script>
 </body>
