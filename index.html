@@ -38,7 +38,7 @@
 
   <div id="toolbar">
     <div><strong>Mapillary token</strong></div>
-    <input id="token" type="text" placeholder="YOUR_MAPILLARY_TOKEN" />
+    <input id="token" type="text" placeholder="MLY|24462366120070331|7b445698e786aaa212354b607653e542" />
     <button id="apply">Apply</button>
   </div>
 
@@ -111,7 +111,7 @@
 
     // Vector tile URL builder
     function tilesURL() {
-      return `https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}?access_token=${encodeURIComponent(ACCESS_TOKEN)}`;
+      return `https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}?access_token=MLY|24462366120070331|7b445698e786aaa212354b607653e542`;
     }
 
     // Build the VectorGrid layer (note: we’ll hide/show sublayers by zoom)
