@@ -12,9 +12,8 @@
   <!-- Vector tiles for Leaflet -->
   <script src="https://unpkg.com/leaflet.vectorgrid@1.3.0/dist/Leaflet.VectorGrid.bundled.js"></script>
 
-  <!-- MapillaryJS -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/mapillary-js@latest/dist/mapillary.css" />
-  <script src="https://cdn.jsdelivr.net/npm/mapillary-js@latest/dist/mapillary.min.js"></script>
+  <!-- MapillaryJS styles -->
+  <link rel="stylesheet" href="https://unpkg.com/mapillary-js@latest/dist/mapillary.css" />
 
   <style>
     html, body { height: 100%; margin: 0; }
@@ -42,36 +41,36 @@
     <button id="apply">Apply</button>
   </div>
 
-  <script>
+  <!-- Use ES module build of MapillaryJS -->
+  <script type="module">
+    import { Viewer } from "https://unpkg.com/mapillary-js@latest/dist/mapillary.module.js";
+
     // ====== CONFIG ======
-    const INITIAL = { lat: 39.5, lng: -98.35, zoom: 4 }; // Adjust as needed
-    let ACCESS_TOKEN = 'MLY|24462366120070331|7b445698e786aaa212354b607653e542';
+    const INITIAL = { lat: 39.5, lng: -98.35, zoom: 4 };
+    let ACCESS_TOKEN = document.getElementById('token').value.trim();
     // ====================
 
     // Initialize viewer
-    const viewer = new Mapillary.Viewer({
+    let viewer = new Viewer({
       accessToken: ACCESS_TOKEN,
       container: 'mly',
       component: { cover: false }
     });
 
     // Initialize Leaflet map
-    const map = L.map('map', {
-      zoomControl: true,
-      preferCanvas: true
-    }).setView([INITIAL.lat, INITIAL.lng], INITIAL.zoom);
+    const map = L.map('map', { zoomControl: true, preferCanvas: true })
+      .setView([INITIAL.lat, INITIAL.lng], INITIAL.zoom);
 
-    // Basemap
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
     // Helper: format timestamp (ms since epoch)
-    function fmtTime(ms) {
-      try { return new Date(Number(ms)).toLocaleString(); }
-      catch { return ms; }
-    }
+    const fmtTime = (ms) => {
+      const n = Number(ms);
+      return isFinite(n) ? new Date(n).toLocaleString() : String(ms);
+    };
 
     // Styles
     const styles = {
@@ -125,7 +124,7 @@
     map.on('zoomend', updateLayerVisibility);
     updateLayerVisibility();
 
-    // Click -> load image in viewer
+    // Click -> load image in viewer (at z14 clicks are image points)
     vgrid.on('click', (e) => {
       const props = e.layer?.properties || {};
       const z = map.getZoom();
@@ -150,7 +149,7 @@
       }
     });
 
-    // Token swap UI
+    // Swap token on the fly
     document.getElementById('apply').addEventListener('click', () => {
       const t = document.getElementById('token').value.trim();
       if (!t) return;
@@ -166,24 +165,21 @@
         vectorTileLayerStyles: vgrid.options.vectorTileLayerStyles,
         getFeatureId: f => `${f.layer.name}:${f.properties.id}`
       }).addTo(map);
-      vgrid.on('click', (ev) => map.fire('click', ev)); // (not strictly needed)
       updateLayerVisibility();
 
-      // Update viewer token (recreating viewer is simplest + safest)
-      const container = document.getElementById('mly');
-      container.innerHTML = '';
-      const newViewer = new Mapillary.Viewer({
+      // Recreate viewer with new token
+      document.getElementById('mly').innerHTML = '';
+      viewer = new Viewer({
         accessToken: ACCESS_TOKEN,
         container: 'mly',
         component: { cover: false }
       });
-      // optional: moveTo last image again if you want to persist state
     });
 
     // Support ?token=... in URL
     (function () {
-      const params = new URLSearchParams(location.search);
-      const t = params.get('token');
+      const p = new URLSearchParams(location.search);
+      const t = p.get('token');
       if (t) {
         document.getElementById('token').value = t;
         document.getElementById('apply').click();
